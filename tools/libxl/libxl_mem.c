@@ -465,8 +465,10 @@ int libxl_domain_need_memory(libxl_ctx *ctx,
     case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_HVM:
         *need_memkb += b_info->shadow_memkb + LIBXL_HVM_EXTRA_MEMORY;
-        if (libxl_defbool_val(b_info->device_model_stubdomain))
-            *need_memkb += 32 * 1024;
+        if (libxl_defbool_val(b_info->device_model_stubdomain)) {
+            *need_memkb += b_info->stubdomain_memkb;
+            *need_memkb += b_info->video_memkb;
+        }
         break;
     case LIBXL_DOMAIN_TYPE_PV:
         *need_memkb += b_info->shadow_memkb + LIBXL_PV_EXTRA_MEMORY;
