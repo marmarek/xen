@@ -25,6 +25,7 @@
 #include <xengnttab.h>
 #include <xenstore.h>
 #include <xen/io/console.h>
+#include <xen/io/xenbus.h>
 #include <xen/grant_table.h>
 
 #include <stdlib.h>
@@ -110,6 +111,7 @@ struct console {
 	struct domain *d;
 	bool optional;
 	bool use_gnttab;
+	bool have_state;
 };
 
 struct console_type {
@@ -118,6 +120,7 @@ struct console_type {
 	char *log_suffix;
 	bool optional;
 	bool use_gnttab;
+	bool have_state;  // uses 'state' xenstore entry
 };
 
 static struct console_type console_type[] = {
@@ -156,6 +159,8 @@ typedef int (*INT_ITER_FUNC_ARG1)(struct console *);
 typedef void (*VOID_ITER_FUNC_ARG2)(struct console *,  void *);
 typedef int (*INT_ITER_FUNC_ARG3)(struct console *,
 				  struct domain *dom, void **);
+
+static void handle_tty_write(struct console *con);
 
 static inline bool console_enabled(struct console *con)
 {
@@ -672,6 +677,20 @@ static int xs_gather(struct xs_handle *xs, const char *dir, ...)
 	return ret;
 }
 
+static void set_backend_state(struct console *con, int state)
+{
+	char path[PATH_MAX], state_str[2], *be_path;
+
+	snprintf(state_str, sizeof(state_str), "%d", state);
+	snprintf(path, sizeof(path), "%s/backend", con->xspath);
+	be_path = xs_read(xs, XBT_NULL, path, NULL);
+	if (be_path) {
+		snprintf(path, sizeof(path), "%s/state", be_path);
+		xs_write(xs, XBT_NULL, path, state_str, 1);
+		free(be_path);
+	}
+}
+
 static void console_unmap_interface(struct console *con)
 {
 	if (con->interface == NULL)
@@ -683,7 +702,7 @@ static void console_unmap_interface(struct console *con)
 	con->interface = NULL;
 	con->ring_ref = -1;
 }
- 
+
 static int console_create_ring(struct console *con)
 {
 	int err, remote_port, ring_ref, rc;
@@ -787,8 +806,68 @@ static int console_create_ring(struct console *con)
 	if (log_guest && (con->log_fd == -1))
 		con->log_fd = create_console_log(con);
 
+	/* if everything ok, signal backend readiness, in backend tree */
+	set_backend_state(con, XenbusStateConnected);
+
  out:
 	return err;
+}
+
+/* gracefully close console */
+static int console_close(struct console *con) {
+
+	if (con->interface && con->master_fd != -1 && con->buffer.data) {
+		/* handle remaining data in buffers */
+		buffer_append(con);
+
+		/* write it out, if possible */
+		if (con->master_pollfd_idx != -1) {
+			if (fds[con->master_pollfd_idx].revents &
+					POLLOUT)
+				handle_tty_write(con);
+		}
+	}
+
+	console_close_tty(con);
+	console_unmap_interface(con);
+	set_backend_state(con, XenbusStateClosed);
+
+	return 0;
+}
+
+
+static int handle_console_state(struct console *con) {
+	int err, state;
+
+	if (!con->have_state)
+		return console_create_ring(con);
+
+	err = xs_gather(xs, con->xspath,
+			"state", "%u", &state,
+			NULL);
+	if (err)
+		/* no 'state' entry, assume removal */
+		state = XenbusStateClosed;
+
+	switch (state) {
+		case XenbusStateInitialising:
+		case XenbusStateInitWait:
+			/* wait for frontent init */
+			return 0;
+		case XenbusStateInitialised:
+		case XenbusStateConnected:
+			/* ok, init backend (also on restart) */
+			return console_create_ring(con);
+		case XenbusStateClosing:
+		case XenbusStateClosed:
+			/* close requested */
+			return console_close(con);
+		default:
+			dolog(LOG_ERR,
+			      "Invalid state %d set by console %s of domain %d\n",
+			      state, con->xspath, con->d->domid);
+			return 1;
+	}
 }
 
 static int watch_domain(struct console *con, struct domain *dom, void **data)
@@ -801,7 +880,7 @@ static int watch_domain(struct console *con, struct domain *dom, void **data)
 	if (watch) {
 		success = xs_watch(xs, con->xspath, domid_str);
 		if (success)
-			console_create_ring(con);
+			handle_console_state(con);
 		else
 			xs_unwatch(xs, con->xspath, domid_str);
 	} else {
@@ -839,6 +918,7 @@ static int console_init(struct console *con, struct domain *dom, void **data)
 	con->log_suffix = (*con_type)->log_suffix;
 	con->optional = (*con_type)->optional;
 	con->use_gnttab = (*con_type)->use_gnttab;
+	con->have_state = (*con_type)->have_state;
 	xsname = (char *)(*con_type)->xsname;
 	xspath = xs_get_domain_path(xs, dom->domid);
 	s = realloc(xspath, strlen(xspath) +
@@ -1149,7 +1229,7 @@ static void handle_xs(void)
 		/* We may get watches firing for domains that have recently
 		   been removed, so dom may be NULL here. */
 		if (dom && dom->is_dead == false)
-			console_iter_int_arg1(dom, console_create_ring);
+			console_iter_int_arg1(dom, handle_console_state);
 	}
 
 	free(vec);
