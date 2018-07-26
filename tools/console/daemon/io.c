@@ -791,24 +791,24 @@ static int console_create_ring(struct console *con)
 	return err;
 }
 
-static bool watch_domain(struct domain *dom, bool watch)
+static int watch_domain(struct console *con, struct domain *dom, void **data)
 {
+	bool watch = data;
 	char domid_str[3 + MAX_STRLEN(dom->domid)];
 	bool success;
-	struct console *con = &dom->console[0];
 
 	snprintf(domid_str, sizeof(domid_str), "dom%u", dom->domid);
 	if (watch) {
 		success = xs_watch(xs, con->xspath, domid_str);
 		if (success)
-			console_iter_int_arg1(dom, console_create_ring);
+			console_create_ring(con);
 		else
 			xs_unwatch(xs, con->xspath, domid_str);
 	} else {
 		success = xs_unwatch(xs, con->xspath, domid_str);
 	}
 
-	return success;
+	return !success;
 }
 
 static int console_init(struct console *con, struct domain *dom, void **data)
@@ -878,7 +878,7 @@ static struct domain *create_domain(int domid)
 	if (console_iter_int_arg3(dom, console_init, (void **)&con_type))
 		goto out;
 
-	if (!watch_domain(dom, true))
+	if (console_iter_int_arg3(dom, watch_domain, (void**)true))
 		goto out;
 
 	dom->next = dom_head;
@@ -952,7 +952,7 @@ static void console_close_evtchn(struct console *con)
 static void shutdown_domain(struct domain *d)
 {
 	d->is_dead = true;
-	watch_domain(d, false);
+	console_iter_int_arg3(d, watch_domain, (void**)false);
 	console_iter_void_arg1(d, console_unmap_interface);
 	console_iter_void_arg1(d, console_close_evtchn);
 }
