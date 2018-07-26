@@ -111,6 +111,7 @@ struct console {
 	struct domain *d;
 	bool optional;
 	bool use_gnttab;
+	bool use_reserved_gnttab;
 	bool have_state;
 };
 
@@ -120,6 +121,7 @@ struct console_type {
 	char *log_suffix;
 	bool optional;
 	bool use_gnttab;
+	bool use_reserved_gnttab;
 	bool have_state;  // uses 'state' xenstore entry
 };
 
@@ -130,6 +132,7 @@ static struct console_type console_type[] = {
 		.log_suffix = "",
 		.optional = false,
 		.use_gnttab = true,
+		.use_reserved_gnttab = true,
 	},
 #if defined(CONFIG_ARM)
 	{
@@ -695,7 +698,7 @@ static void console_unmap_interface(struct console *con)
 {
 	if (con->interface == NULL)
 		return;
-	if (xgt_handle && con->ring_ref == -1)
+	if (xgt_handle && con->use_gnttab)
 		xengnttab_unmap(xgt_handle, con->interface, 1);
 	else
 		munmap(con->interface, XC_PAGE_SIZE);
@@ -739,12 +742,19 @@ static int console_create_ring(struct console *con)
 
 	if (!con->interface && xgt_handle && con->use_gnttab) {
 		/* Prefer using grant table */
-		con->interface = xengnttab_map_grant_ref(xgt_handle,
-			dom->domid, GNTTAB_RESERVED_CONSOLE,
-			PROT_READ|PROT_WRITE);
-		con->ring_ref = -1;
+		if (con->use_reserved_gnttab) {
+			con->interface = xengnttab_map_grant_ref(xgt_handle,
+					dom->domid, GNTTAB_RESERVED_CONSOLE,
+					PROT_READ|PROT_WRITE);
+			con->ring_ref = -1;
+		} else {
+			con->interface = xengnttab_map_grant_ref(xgt_handle,
+					dom->domid, ring_ref,
+					PROT_READ|PROT_WRITE);
+			con->ring_ref = ring_ref;
+		}
 	}
-	if (!con->interface) {
+	if (!con->interface && (!con->use_gnttab || con->use_reserved_gnttab)) {
 		/* Fall back to xc_map_foreign_range */
 		con->interface = xc_map_foreign_range(
 			xc, dom->domid, XC_PAGE_SIZE,
@@ -918,6 +928,7 @@ static int console_init(struct console *con, struct domain *dom, void **data)
 	con->log_suffix = (*con_type)->log_suffix;
 	con->optional = (*con_type)->optional;
 	con->use_gnttab = (*con_type)->use_gnttab;
+	con->use_reserved_gnttab = (*con_type)->use_reserved_gnttab;
 	con->have_state = (*con_type)->have_state;
 	xsname = (char *)(*con_type)->xsname;
 	xspath = xs_get_domain_path(xs, dom->domid);
