@@ -134,6 +134,30 @@ static struct console_type console_type[] = {
 		.use_gnttab = true,
 		.use_reserved_gnttab = true,
 	},
+	{
+		.xsname = "/device/console/1",
+		.ttyname = "tty",
+		.log_suffix = "-con1",
+		.optional = true,
+		.use_gnttab = true,
+		.have_state = true,
+	},
+	{
+		.xsname = "/device/console/2",
+		.ttyname = "tty",
+		.log_suffix = "-con2",
+		.optional = true,
+		.use_gnttab = true,
+		.have_state = true,
+	},
+	{
+		.xsname = "/device/console/3",
+		.ttyname = "tty",
+		.log_suffix = "-con3",
+		.optional = true,
+		.use_gnttab = true,
+		.have_state = true,
+	},
 #if defined(CONFIG_ARM)
 	{
 		.xsname = "/vuart/0",
