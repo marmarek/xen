@@ -1439,9 +1439,13 @@ static void domcreate_launch_dm(libxl__egc *egc, libxl__multidev *multidev,
         libxl__device_console_add(gc, domid, &console, state, &device);
         libxl__device_console_dispose(&console);
 
-        libxl_device_vkb_init(&vkb);
-        libxl__device_add(gc, domid, &libxl__vkb_devtype, &vkb);
-        libxl_device_vkb_dispose(&vkb);
+        if (libxl_defbool_val(d_config->b_info.u.hvm.vnc.enable)
+            || libxl_defbool_val(d_config->b_info.u.hvm.spice.enable)
+            || libxl_defbool_val(d_config->b_info.u.hvm.sdl.enable)) {
+            libxl_device_vkb_init(&vkb);
+            libxl__device_add(gc, domid, &libxl__vkb_devtype, &vkb);
+            libxl_device_vkb_dispose(&vkb);
+        }
 
         dcs->sdss.dm.guest_domid = domid;
         if (libxl_defbool_val(d_config->b_info.device_model_stubdomain))
