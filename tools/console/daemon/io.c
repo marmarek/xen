@@ -819,9 +819,7 @@ static int console_create_ring(struct console *con)
 
 	if (rc == -1) {
 		err = errno;
-		xenevtchn_close(con->xce_handle);
-		con->xce_handle = NULL;
-		goto out;
+		goto err_xce;
 	}
 	con->local_port = rc;
 	con->remote_port = remote_port;
@@ -829,11 +827,7 @@ static int console_create_ring(struct console *con)
 	if (con->master_fd == -1) {
 		if (!console_create_tty(con)) {
 			err = errno;
-			xenevtchn_close(con->xce_handle);
-			con->xce_handle = NULL;
-			con->local_port = -1;
-			con->remote_port = -1;
-			goto out;
+			goto err_xce;
 		}
 	}
 
@@ -843,6 +837,13 @@ static int console_create_ring(struct console *con)
 	/* if everything ok, signal backend readiness, in backend tree */
 	set_backend_state(con, XenbusStateConnected);
 
+ err_xce:
+	if (err) {
+		xenevtchn_close(con->xce_handle);
+		con->xce_handle = NULL;
+		con->local_port = -1;
+		con->remote_port = -1;
+	}
  out:
 	return err;
 }
