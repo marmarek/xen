@@ -2387,7 +2387,9 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
 
     for (i = 0; i < num_console; i++) {
         console[i].devid = i;
-        console[i].consback = LIBXL__CONSOLE_BACKEND_IOEMU;
+        /* will be changed back to LIBXL__CONSOLE_BACKEND_IOEMU if qemu
+         * will be in use */
+        console[i].consback = LIBXL__CONSOLE_BACKEND_XENCONSOLED;
         /* STUBDOM_CONSOLE_LOGGING (console 0) is for minios logging
          * STUBDOM_CONSOLE_SAVE (console 1) is for writing the save file
          * STUBDOM_CONSOLE_RESTORE (console 2) is for reading the save file
@@ -2402,9 +2404,6 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
                 if (ret) goto out;
                 console[i].output = GCSPRINTF("file:%s", filename);
                 free(filename);
-                /* will be changed back to LIBXL__CONSOLE_BACKEND_IOEMU if qemu
-                 * will be in use */
-                console[i].consback = LIBXL__CONSOLE_BACKEND_XENCONSOLED;
                 break;
             case STUBDOM_CONSOLE_SAVE:
                 console[i].output = GCSPRINTF("file:%s",
