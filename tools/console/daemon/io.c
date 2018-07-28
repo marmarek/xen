@@ -96,6 +96,8 @@ struct console {
 	int master_fd;
 	int master_pollfd_idx;
 	int slave_fd;
+	bool master_fd_can_read;
+	bool master_fd_can_write;
 	int log_fd;
 	struct buffer buffer;
 	char *xspath;
@@ -730,6 +732,53 @@ static void console_unmap_interface(struct console *con)
 	con->ring_ref = -1;
 }
 
+static int create_console_output(struct console *con)
+{
+	int err;
+	char *output, *path;
+
+	if (asprintf(&path, "%s/%s", con->xspath, "output") == -1) {
+		err = ENOMEM;
+		goto out;
+	}
+
+	con->master_fd_can_read = true;
+	con->master_fd_can_write = true;
+
+	output = xs_read(xs, XBT_NULL, path, NULL);
+
+	if (!output || !strcmp(output, "pty")) {
+		if (!console_create_tty(con)) {
+			err = errno;
+			goto out;
+		}
+	} else if (!strncmp(output, "file:", 5)) {
+		con->master_fd = open(output+5, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		if (con->master_fd == -1) {
+			err = errno;
+			goto out;
+		}
+		/* this is write-only file */
+		con->master_fd_can_read = false;
+	} else if (!strncmp(output, "pipe:", 5)) {
+		con->master_fd = open(output+5, O_RDWR);
+		if (con->master_fd == -1) {
+			err = errno;
+			goto out;
+		}
+	} else if (!strcmp(output, "null")) {
+		con->master_fd = open("/dev/null", O_RDWR);
+		if (con->master_fd == -1) {
+			err = errno;
+			goto out;
+		}
+	}
+
+	err = 0;
+out:
+	return err;
+}
+
 static int console_create_ring(struct console *con)
 {
 	int err, remote_port, ring_ref, rc;
@@ -825,10 +874,9 @@ static int console_create_ring(struct console *con)
 	con->remote_port = remote_port;
 
 	if (con->master_fd == -1) {
-		if (!console_create_tty(con)) {
-			err = errno;
+		err = create_console_output(con);
+		if (err)
 			goto err_xce;
-		}
 	}
 
 	if (log_guest && (con->log_fd == -1))
@@ -941,6 +989,8 @@ static int console_init(struct console *con, struct domain *dom, void **data)
 
 	con->master_fd = -1;
 	con->master_pollfd_idx = -1;
+	con->master_fd_can_read = true;
+	con->master_fd_can_write = true;
 	con->slave_fd = -1;
 	con->log_fd = -1;
 	con->ring_ref = -1;
@@ -1152,6 +1202,8 @@ static void handle_tty_read(struct console *con)
 	 */
 	if (len < 0) {
 		console_handle_broken_tty(con, domain_is_valid(dom->domid));
+	} else if (len == 0) {
+		con->master_fd_can_read = false;
 	} else if (domain_is_valid(dom->domid)) {
 		prod = intf->in_prod;
 		for (i = 0; i < len; i++) {
@@ -1396,10 +1448,10 @@ static void maybe_add_console_tty_fd(struct console *con)
 {
 	if (con->master_fd != -1) {
 		short events = 0;
-		if (!con->d->is_dead && ring_free_bytes(con))
+		if (!con->d->is_dead && con->master_fd_can_read && ring_free_bytes(con))
 			events |= POLLIN;
 
-		if (!buffer_empty(&con->buffer))
+		if (con->master_fd_can_write && !buffer_empty(&con->buffer))
 			events |= POLLOUT;
 
 		if (events)
