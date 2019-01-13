@@ -1489,6 +1489,11 @@ static void dm_state_saved(libxl__egc *egc, libxl__ev_qmp *ev,
 
 /* prototypes */
 
+static int qmp_ev_connect_vchan(libxl__gc *gc, libxl__ev_qmp *ev);
+static void qmp_vchan_watch_callback(libxl__egc *egc,
+      libxl__xswait_state *xswa, int rc, const char *data);
+static void qmp_ev_vchan_fd_callback(libxl__egc *egc, libxl__ev_fd *ev_fd,
+                               int fd, short events, short revents);
 static void qmp_ev_fd_callback(libxl__egc *egc, libxl__ev_fd *ev_fd,
                                int fd, short events, short revents);
 static int qmp_ev_callback_writable(libxl__gc *gc,
@@ -1508,6 +1513,9 @@ static void qmp_ev_ensure_reading_writing(libxl__gc *gc, libxl__ev_qmp *ev)
      * on entry: !disconnected */
 {
     short events = POLLIN;
+
+    if (ev->vchan)
+        return;
 
     if (ev->tx_buf)
         events |= POLLOUT;
@@ -1587,6 +1595,8 @@ static int qmp_error_class_to_libxl_error_code(libxl__gc *gc,
 
 /* Setup connection */
 
+/*   - QMP over unix socket */
+
 static int qmp_ev_connect(libxl__gc *gc, libxl__ev_qmp *ev)
     /* disconnected -> connecting but with `msg` free
      * on error: broken */
@@ -1597,6 +1607,10 @@ static int qmp_ev_connect(libxl__gc *gc, libxl__ev_qmp *ev)
     const char *qmp_socket_path;
 
     assert(ev->state == qmp_state_disconnected);
+
+    /* use vchan connection for stubdomain */
+    if (libxl_get_stubdom_id(CTX, ev->domid))
+        return qmp_ev_connect_vchan(gc, ev);
 
     qmp_socket_path = libxl__qemu_qmp_path(gc, ev->domid);
 
@@ -1640,6 +1654,85 @@ static int qmp_ev_connect(libxl__gc *gc, libxl__ev_qmp *ev)
 out:
     return rc;
 }
+
+/*   - QMP over vchan */
+
+static int qmp_ev_connect_vchan(libxl__gc *gc, libxl__ev_qmp *ev)
+    /* disconnected -> connecting but with `msg` free
+     * on error: broken */
+{
+    int dm_domid;
+    int rc;
+
+    assert(ev->state == qmp_state_disconnected);
+
+    dm_domid = libxl_get_stubdom_id(CTX, ev->domid);
+    assert(dm_domid != 0);
+
+    ev->xswait.ao = ev->ao;
+    ev->xswait.what = GCSPRINTF("qmp vchan for %u", ev->domid);
+    ev->xswait.path = DEVICE_MODEL_XS_PATH(gc, dm_domid, ev->domid, "/qmp-vchan");
+    ev->xswait.timeout_ms = LIBXL_STUBDOM_START_TIMEOUT * 1000;
+    ev->xswait.callback = qmp_vchan_watch_callback;
+
+    LOGD(DEBUG, ev->domid, "Connecting to vchan at %s", ev->xswait.path);
+
+    rc = libxl__xswait_start(gc, &ev->xswait);
+    if (rc) goto out;
+
+    qmp_ev_set_state(gc, ev, qmp_state_connecting);
+
+    return 0;
+
+out:
+    return rc;
+}
+
+static void qmp_vchan_watch_callback(libxl__egc *egc,
+      libxl__xswait_state *xswa, int rc, const char *data)
+{
+    libxl__ev_qmp *ev = CONTAINER_OF(xswa, *ev, xswait);
+    STATE_AO_GC(ev->ao);
+    int dm_domid = libxl_get_stubdom_id(CTX, ev->domid);
+
+    if (!rc) {
+        ev->vchan = libxenvchan_client_init(CTX->lg, dm_domid, ev->xswait.path);
+        if (ev->vchan) {
+            /* ok */
+            libxl__xswait_stop(gc, &ev->xswait);
+
+            rc = libxl__ev_fd_register(gc, &ev->efd, qmp_ev_vchan_fd_callback,
+                    libxenvchan_fd_for_select(ev->vchan), POLLIN);
+            if (!rc)
+                return;
+        }
+        if (errno == ENOENT) {
+            /* not ready yet, wait */
+            return;
+        } else {
+            LOGD(ERROR, ev->domid, "Connection to qmp vchan for %u failed", ev->domid);
+            rc = ERROR_FAIL;
+        }
+    }
+
+    /* error handling */
+
+    if (rc==ERROR_TIMEDOUT || rc==ERROR_ABORTED)
+        LOGD(ERROR, ev->domid, "Connection to qmp vchan for %u timed out", ev->domid);
+
+
+    if (ev->vchan) {
+        libxenvchan_close(ev->vchan);
+        ev->vchan = NULL;
+    }
+
+    /* On error, deallocate all private ressources */
+    libxl__ev_qmp_dispose(gc, ev);
+
+    /* And tell libxl__ev_qmp user about the error */
+    ev->callback(egc, ev, NULL, rc); /* must be last */
+}
+
 
 /* QMP FD callbacks */
 
@@ -1713,6 +1806,66 @@ error:
     ev->callback(egc, ev, NULL, rc); /* must be last */
 }
 
+static void qmp_ev_vchan_fd_callback(libxl__egc *egc, libxl__ev_fd *ev_fd,
+                               int fd, short events, short revents)
+    /* On entry, ev_fd is (of course) Active.  The ev_qmp may be in any
+     * state where this is permitted.  qmp_ev_vchan_fd_callback will do the work
+     * necessary to make progress, depending on the current state, and make
+     * the appropriate state transitions and callbacks.  */
+{
+    libxl__ev_qmp *ev = CONTAINER_OF(ev_fd, *ev, efd);
+    STATE_AO_GC(ev->ao);
+    int rc;
+
+    assert(ev->vchan);
+
+    if (revents & ~(POLLIN)) {
+        LOGD(ERROR, ev->domid,
+             "unexpected poll event 0x%x on QMP vchan FD (expected POLLIN)",
+            revents);
+        rc = ERROR_FAIL;
+        goto error;
+    }
+
+    if (revents & POLLIN) {
+        libxenvchan_wait(ev->vchan);
+        if (libxenvchan_buffer_space(ev->vchan)) {
+            rc = qmp_ev_callback_writable(gc, ev, fd);
+            if (rc)
+                goto error;
+        }
+
+        if (libxenvchan_data_ready(ev->vchan)) {
+            rc = qmp_ev_callback_readable(egc, ev, fd);
+            if (rc < 0)
+                goto error;
+            if (rc == 1) {
+                /* user callback has been called */
+                /* FIXME: if some data left in the ring buffer,
+                 * qmp_ev_vchan_fd_callback will _not_ be called again, unless
+                 * qemu write more data */
+                return;
+            }
+        }
+    }
+
+    return;
+
+error:
+    assert(rc);
+
+    LOGD(ERROR, ev->domid,
+         "Error happened with the QMP connection to QEMU");
+
+    /* On error, deallocate all private ressources */
+    libxl__ev_qmp_dispose(gc, ev);
+
+    /* And tell libxl__ev_qmp user about the error */
+    ev->callback(egc, ev, NULL, rc); /* must be last */
+}
+
+
+
 static int qmp_ev_callback_writable(libxl__gc *gc,
                                     libxl__ev_qmp *ev, int fd)
     /* on entry: !disconnected
@@ -1748,6 +1901,13 @@ static int qmp_ev_callback_writable(libxl__gc *gc,
         ev->payload_fd >= 0 &&
         ev->tx_buf_off == 0) {
 
+        /* sending FDs not supported over vchan */
+        if (ev->vchan) {
+            /* XXX should it be assert? */
+            LOGED(ERROR, ev->domid, "Sending FD over vchan connection not supported");
+            return ERROR_NI;
+        }
+
         rc = libxl__sendmsg_fds(gc, fd, ev->tx_buf[ev->tx_buf_off],
                                 1, &ev->payload_fd, "QMP socket");
         /* Check for EWOULDBLOCK, and return to try again later */
@@ -1760,7 +1920,16 @@ static int qmp_ev_callback_writable(libxl__gc *gc,
 
     while (ev->tx_buf_off < ev->tx_buf_len) {
         ssize_t max_write = ev->tx_buf_len - ev->tx_buf_off;
-        r = write(fd, ev->tx_buf + ev->tx_buf_off, max_write);
+        if (ev->vchan) {
+            r = libxenvchan_write(ev->vchan, ev->tx_buf + ev->tx_buf_off, max_write);
+            /* libxenvchan_write returns 0 if no space left, translate to EWOULDBLOCK */
+            if (r == 0) {
+                r = -1;
+                errno = EWOULDBLOCK;
+            }
+        } else {
+            r = write(fd, ev->tx_buf + ev->tx_buf_off, max_write);
+        }
         if (r < 0) {
             if (errno == EINTR)
                 continue;
@@ -1834,8 +2003,18 @@ static int qmp_ev_callback_readable(libxl__egc *egc,
             ev->rx_buf = libxl__realloc(gc, ev->rx_buf, ev->rx_buf_size);
         }
 
-        r = read(fd, ev->rx_buf + ev->rx_buf_used,
-                 ev->rx_buf_size - ev->rx_buf_used);
+        if (ev->vchan) {
+            r = libxenvchan_read(ev->vchan, ev->rx_buf + ev->rx_buf_used,
+                    ev->rx_buf_size - ev->rx_buf_used);
+            /* translate r == 0 to EWOULDBLOCK */
+            if (r == 0) {
+                r = -1;
+                errno = EWOULDBLOCK;
+            }
+        } else {
+            r = read(fd, ev->rx_buf + ev->rx_buf_used,
+                     ev->rx_buf_size - ev->rx_buf_used);
+        }
         if (r < 0) {
             if (errno == EINTR)
                 continue;
@@ -2121,6 +2300,8 @@ void libxl__ev_qmp_init(libxl__ev_qmp *ev)
     ev->next_id = 0x786c7100;
 
     ev->cfd = NULL;
+    ev->vchan = NULL;
+    libxl__xswait_init(&ev->xswait);
     libxl__ev_fd_init(&ev->efd);
     ev->state = qmp_state_disconnected;
     ev->id = 0;
@@ -2185,7 +2366,10 @@ void libxl__ev_qmp_dispose(libxl__gc *gc, libxl__ev_qmp *ev)
     LOGD(DEBUG, ev->domid, " ev %p", ev);
 
     libxl__ev_fd_deregister(gc, &ev->efd);
-    libxl__carefd_close(ev->cfd);
+    if (ev->vchan)
+        libxenvchan_close(ev->vchan);
+    else
+        libxl__carefd_close(ev->cfd);
 
     libxl__ev_qmp_init(ev);
 }

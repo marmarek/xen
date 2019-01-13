@@ -1180,7 +1180,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                       "-xen-domid",
                       GCSPRINTF("%d", guest_domid), NULL);
 
-    /* There is currently no way to access the QMP socket in the stubdom */
+    /* QMP access to qemu running in stubdomain is done over vchan, not local socket */
     if (!is_stubdom) {
         flexarray_append(dm_args, "-chardev");
         if (state->dm_monitor_fd >= 0) {

@@ -24,6 +24,7 @@ LIBXL_LIBS = $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl)
 ifeq ($(CONFIG_LIBNL),y)
 LIBXL_LIBS += $(LIBNL3_LIBS)
 endif
+LIBXL_LIBS += $(LDLIBS_libxenvchan)
 
 CFLAGS_LIBXL += $(CFLAGS_libxentoollog)
 CFLAGS_LIBXL += $(CFLAGS_libxentoolcore)
@@ -35,6 +36,7 @@ CFLAGS_LIBXL += $(CFLAGS_libblktapctl)
 ifeq ($(CONFIG_LIBNL),y)
 CFLAGS_LIBXL += $(LIBNL3_CFLAGS)
 endif
+CFLAGS_LIBXL += $(CFLAGS_libxenvchan)
 CFLAGS_LIBXL += -Wshadow
 
 LIBXL_LIBS-$(CONFIG_ARM) += -lfdt

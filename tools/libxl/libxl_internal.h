@@ -57,6 +57,7 @@
 #include <xenctrl.h>
 #include <xenguest.h>
 #include <xc_dom.h>
+#include <libxenvchan.h>
 
 #include <xen-tools/libs.h>
 
@@ -509,6 +510,8 @@ struct libxl__ev_qmp {
     libxl__carefd *cfd;
     libxl__ev_fd efd;
     libxl__qmp_state state;
+    struct libxenvchan *vchan;
+    libxl__xswait_state xswait;
     int id;
     int next_id;        /* next id to use */
     /* receive buffer */
