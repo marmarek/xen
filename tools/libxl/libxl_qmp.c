@@ -113,6 +113,7 @@ typedef struct callback_id_pair {
 
 struct libxl__qmp_handler {
     int qmp_fd;
+    struct libxenvchan *vchan;
     bool connected;
     time_t timeout;
     /* wait_for_id will be used by the synchronous send function */
@@ -496,7 +497,10 @@ static void qmp_close(libxl__qmp_handler *qmp)
     callback_id_pair *pp = NULL;
     callback_id_pair *tmp = NULL;
 
-    close(qmp->qmp_fd);
+    if (qmp->vchan)
+        libxenvchan_close(qmp->vchan);
+    else
+        close(qmp->qmp_fd);
     LIBXL_STAILQ_FOREACH(pp, &qmp->callback_list, next) {
         free(tmp);
         tmp = pp;
@@ -516,7 +520,7 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
 
     do {
         fd_set rfds;
-        int ret = 0;
+        int ret = 1; /* used when select() is skipped */
         struct timeval timeout = {
             .tv_sec = qmp->timeout,
             .tv_usec = 0,
@@ -525,7 +529,8 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
         FD_ZERO(&rfds);
         FD_SET(qmp->qmp_fd, &rfds);
 
-        ret = select(qmp->qmp_fd + 1, &rfds, NULL, NULL, &timeout);
+        if (!(qmp->vchan && libxenvchan_data_ready(qmp->vchan)))
+            ret = select(qmp->qmp_fd + 1, &rfds, NULL, NULL, &timeout);
         if (ret == 0) {
             LOGD(ERROR, qmp->domid, "timeout");
             return -1;
@@ -536,7 +541,14 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
             return -1;
         }
 
-        rd = read(qmp->qmp_fd, qmp->buffer, QMP_RECEIVE_BUFFER_SIZE);
+        if (qmp->vchan) {
+            libxenvchan_wait(qmp->vchan);
+            if (!libxenvchan_data_ready(qmp->vchan))
+                continue;
+            rd = libxenvchan_read(qmp->vchan, qmp->buffer, QMP_RECEIVE_BUFFER_SIZE);
+        } else {
+            rd = read(qmp->qmp_fd, qmp->buffer, QMP_RECEIVE_BUFFER_SIZE);
+        }
         if (rd == 0) {
             LOGD(ERROR, qmp->domid, "Unexpected end of socket");
             return -1;
@@ -684,9 +696,15 @@ static int qmp_send(libxl__qmp_handler *qmp,
         goto out;
     }
 
-    if (libxl_write_exactly(qmp->ctx, qmp->qmp_fd, buf, strlen(buf),
-                            "QMP command", "QMP socket"))
-        goto out;
+    if (qmp->vchan) {
+        /* vchan->blocking == 1, so no need to wrap it in a loop */
+        if (libxenvchan_write(qmp->vchan, buf, strlen(buf)) == -1)
+            goto out;
+    } else {
+        if (libxl_write_exactly(qmp->ctx, qmp->qmp_fd, buf, strlen(buf),
+                                "QMP command", "QMP socket"))
+            goto out;
+    }
 
     rc = qmp->last_id_used;
 out:
@@ -798,19 +816,34 @@ libxl__qmp_handler *libxl__qmp_initialize(libxl__gc *gc, uint32_t domid)
 {
     int ret = 0;
     libxl__qmp_handler *qmp = NULL;
-    char *qmp_socket;
+    int dm_domid;
+    char *qmp_path;
 
     qmp = qmp_init_handler(gc, domid);
     if (!qmp) return NULL;
 
-    qmp_socket = GCSPRINTF("%s/qmp-libxl-%d", libxl__run_dir_path(), domid);
-    if ((ret = qmp_open(qmp, qmp_socket, QMP_SOCKET_CONNECT_TIMEOUT)) < 0) {
-        LOGED(ERROR, domid, "Connection error");
-        qmp_free_handler(qmp);
-        return NULL;
+    dm_domid = libxl_get_stubdom_id(CTX, domid);
+    if (dm_domid) {
+        qmp_path = DEVICE_MODEL_XS_PATH(gc, dm_domid, domid, "/qmp-vchan");
+        /* TODO: add locking */
+        qmp->vchan = libxenvchan_client_init(CTX->lg, dm_domid, qmp_path);
+        if (!qmp->vchan) {
+            LOGED(ERROR, domid, "QMP vchan connection failed: %s", strerror(errno));
+            qmp_free_handler(qmp);
+            return NULL;
+        }
+        qmp->vchan->blocking = 1;
+        qmp->qmp_fd = libxenvchan_fd_for_select(qmp->vchan);
+    } else {
+        qmp_path = GCSPRINTF("%s/qmp-libxl-%d", libxl__run_dir_path(), domid);
+        if ((ret = qmp_open(qmp, qmp_path, QMP_SOCKET_CONNECT_TIMEOUT)) < 0) {
+            LOGED(ERROR, domid, "Connection error");
+            qmp_free_handler(qmp);
+            return NULL;
+        }
     }
 
-    LOGD(DEBUG, domid, "connected to %s", qmp_socket);
+    LOGD(DEBUG, domid, "connected to %s", qmp_path);
 
     /* Wait for the response to qmp_capabilities */
     while (!qmp->connected) {
