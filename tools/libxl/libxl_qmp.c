@@ -1475,7 +1475,7 @@ static void dm_state_saved(libxl__egc *egc, libxl__ev_qmp *ev,
  *
  * - Allowed internal state transition:
  * disconnected                     -> connecting
- * connection                       -> capability_negotiation
+ * connecting                       -> capability_negotiation
  * capability_negotiation/connected -> waiting_reply
  * waiting_reply                    -> connected
  * any                              -> broken
