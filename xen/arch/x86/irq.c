@@ -2674,6 +2674,21 @@ int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
         {
     case MAP_PIRQ_TYPE_MULTI_MSI:
             irq = create_irq(NUMA_NO_NODE);
+            if ( !(irq < nr_irqs_gsi || irq >= nr_irqs) &&
+                 current->domain->target == d )
+            {
+                ret = irq_permit_access(current->domain, irq);
+                if ( ret ) {
+                    dprintk(XENLOG_G_ERR,
+                            "dom%d: can't grant it's stubdom (%d) access to "
+                            "irq %d for msi: %d!\n",
+                            d->domain_id,
+                            current->domain->domain_id,
+                            irq,
+                            ret);
+                    return -EINVAL;
+                }
+            }
         }
 
         if ( irq < nr_irqs_gsi || irq >= nr_irqs )
@@ -2717,7 +2732,15 @@ int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
         case MAP_PIRQ_TYPE_MSI:
             if ( index == -1 )
         case MAP_PIRQ_TYPE_MULTI_MSI:
+            {
+                if ( current->domain->target == d &&
+                     irq_deny_access(current->domain, irq) )
+                    dprintk(XENLOG_G_ERR,
+                            "dom%d: can't revoke stubdom's access to irq %d!\n",
+                            d->domain_id,
+                            irq);
                 destroy_irq(irq);
+            }
             break;
         }
     }
