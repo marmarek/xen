@@ -30,7 +30,7 @@ install: all
 
 .PHONY: uninstall
 
-CFLAGS += -Werror $(CFLAGS_xeninclude) -D__XEN_TOOLS__ -O3
+CFLAGS += -Werror -Wno-format-overflow $(CFLAGS_xeninclude) -D__XEN_TOOLS__ -O3
 CFLAGS += $(APPEND_CFLAGS)
 
 vpath %.c ../../../xen/lib/x86
