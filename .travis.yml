@@ -1,5 +1,5 @@
 language: c
-dist: trusty
+dist: xenial
 sudo: required
 # don't test master, smoke and coverity branches
 branches:
