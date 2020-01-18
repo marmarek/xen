@@ -75,6 +75,7 @@ void libxl__domain_suspend_device_model(libxl__egc *egc,
     STATE_AO_GC(dsps->ao);
     int rc = 0;
     uint32_t const domid = dsps->domid;
+    uint32_t dm_domid;
     const char *const filename = dsps->dm_savefile;
 
     switch (libxl__device_model_version_running(gc, domid)) {
@@ -85,6 +86,16 @@ void libxl__domain_suspend_device_model(libxl__egc *egc,
         break;
     }
     case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
+        dm_domid = libxl_get_stubdom_id(CTX, domid);
+        if (dm_domid != 0 /* && libxl__stubdomain_is_linux_running()*/) {
+            rc = xc_domain_pause(CTX->xch, dm_domid);
+            if (rc < 0) {
+                LOGED(ERROR, domid, "xc_domain_pause failed for domain %d",
+                     dm_domid);
+            }
+            break;
+        }
+
         /* calls dsps->callback_device_model_done when done */
         libxl__qmp_suspend_save(egc, dsps); /* must be last */
         return;
@@ -505,6 +516,7 @@ void libxl__dm_resume(libxl__egc *egc,
 {
     STATE_AO_GC(dmrs->ao);
     int rc = 0;
+    uint32_t dm_domid = libxl_get_stubdom_id(CTX, dmrs->domid);
 
     /* Convenience aliases */
     libxl_domid domid = dmrs->domid;
@@ -520,7 +532,6 @@ void libxl__dm_resume(libxl__egc *egc,
 
     switch (libxl__device_model_version_running(gc, domid)) {
     case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL: {
-        uint32_t dm_domid = libxl_get_stubdom_id(CTX, domid);
         const char *path, *state;
 
         path = DEVICE_MODEL_XS_PATH(gc, dm_domid, domid, "/state");
@@ -541,6 +552,36 @@ void libxl__dm_resume(libxl__egc *egc,
         break;
     }
     case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
+        if (dm_domid != 0 /* && libxl__stubdomain_is_linux_running() */) {
+            xc_domaininfo_t dm_info;
+            int ret = xc_domain_getinfolist(CTX->xch, dm_domid, 1, &dm_info);
+            if (ret < 0) {
+                LOGED(ERROR, domid,
+                     "unable to check for status of domain %d", dm_domid);
+                rc = ret;
+                goto out;
+            }
+
+            if (!(ret == 1 && dm_info.domain == dm_domid)) {
+                LOGED(ERROR, domid,
+                     "domain %d has been destroyed while trying to resume",
+                     dm_domid);
+                rc = ERROR_FAIL;
+                goto out;
+            }
+
+            if ((dm_info.flags & XEN_DOMINF_paused)) {
+                rc = xc_domain_unpause(CTX->xch, dm_domid);
+                if (rc < 0) {
+                    LOGED(ERROR, domid,
+                         "xc_domain_unpause failed for domain %d",
+                         dm_domid);
+                }
+                /* skip qmp */
+                goto out;
+            }
+        }
+
         qmp->ao = dmrs->ao;
         qmp->domid = domid;
         qmp->callback = dm_resume_qmp_done;
