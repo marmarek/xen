@@ -324,8 +324,11 @@ static void device_disk_add(libxl__egc *egc, uint32_t domid,
                 flexarray_append(back, "params");
                 flexarray_append(back, dev);
 
-                script = libxl__abs_path(gc, disk->script?: "block",
-                                         libxl__xen_script_dir_path());
+                if (disk->script && !disk->script[0])
+                    script = "";
+                else
+                    script = libxl__abs_path(gc, disk->script?: "block",
+                                             libxl__xen_script_dir_path());
                 flexarray_append_pair(back, "script", script);
 
                 assert(device->backend_kind == LIBXL__DEVICE_KIND_VBD);

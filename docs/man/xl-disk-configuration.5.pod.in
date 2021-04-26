@@ -261,6 +261,10 @@ information to be interpreted by the executable program I<SCRIPT>,
 
 These scripts are normally called "block-I<SCRIPT>".
 
+Setting empty script avoids calling the hoplug script at all (including
+the default one). It skips device sharing safety check and
+requires the target to point at a block device. Empty script value is supported
+on Linux backend domain only.
 
 =item B<direct-io-safe>
 

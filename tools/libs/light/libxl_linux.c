@@ -160,6 +160,62 @@ out:
     return rc;
 }
 
+static int libxl__hotplug_disk_direct_add(libxl__gc *gc, libxl__device *dev,
+                                      const char *be_path)
+{
+    char *params;
+    xs_transaction_t t = XBT_NULL;
+    struct stat st;
+    int rc = 0;
+    char *xs_kvs[] = { "physical-device", NULL,
+                       "physical-device-path", NULL,
+                       "hotplug-status", "connected",
+                       NULL, NULL, };
+
+    for (;;) {
+        rc = libxl__xs_transaction_start(gc, &t);
+        if (rc) goto error;
+
+        params = libxl__xs_read(gc, t,
+                                GCSPRINTF("%s/%s", be_path, "params"));
+        if (!params) {
+            rc = ERROR_FAIL;
+            goto error;
+        }
+
+        if (stat(params, &st) == -1) {
+            LOGED(ERROR, dev->domid, "failed to stat %s", params);
+            rc = ERROR_FAIL;
+            goto error;
+        }
+
+        if ((st.st_mode & S_IFMT) != S_IFBLK) {
+            LOGD(ERROR, dev->domid, "not a block device: %s", params);
+            rc = ERROR_FAIL;
+            goto error;
+        }
+
+        xs_kvs[1] = GCSPRINTF("%x:%x", major(st.st_rdev), minor(st.st_rdev));
+        xs_kvs[3] = params;
+        rc = libxl__xs_writev(gc, t, be_path, xs_kvs);
+        if (rc) goto error;
+
+        rc = libxl__xs_transaction_commit(gc, &t);
+        if (!rc) break;
+        if (rc < 0) goto error;
+    }
+
+    return 0;
+
+error:
+    libxl__xs_transaction_abort(gc, &t);
+    if (libxl__xs_write_checked(gc, XBT_NULL,
+                                GCSPRINTF("%s/%s", be_path, "hotplug-status"),
+                                "error"))
+        LOGD(ERROR, dev->domid, "failed to write 'hotplug-status'");
+    return rc;
+}
+
 static int libxl__hotplug_disk(libxl__gc *gc, libxl__device *dev,
                                char ***args, char ***env,
                                libxl__device_action action)
@@ -174,6 +230,12 @@ static int libxl__hotplug_disk(libxl__gc *gc, libxl__device *dev,
         LOGEVD(ERROR, errno, dev->domid,
                "unable to read script from %s", be_path);
         rc = ERROR_FAIL;
+        goto out;
+    }
+
+    if (!script[0]) {
+        if (action == LIBXL__DEVICE_ACTION_ADD)
+            rc = libxl__hotplug_disk_direct_add(gc, dev, be_path);
         goto out;
     }
 
