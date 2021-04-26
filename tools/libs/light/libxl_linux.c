@@ -174,14 +174,14 @@ static int libxl__hotplug_disk(libxl__gc *gc, libxl__device *dev,
         LOGEVD(ERROR, errno, dev->domid,
                "unable to read script from %s", be_path);
         rc = ERROR_FAIL;
-        goto error;
+        goto out;
     }
 
     *env = get_hotplug_env(gc, script, dev);
     if (!*env) {
         LOGD(ERROR, dev->domid, "Failed to get hotplug environment");
         rc = ERROR_FAIL;
-        goto error;
+        goto out;
     }
 
     const int arraysize = 3;
@@ -194,7 +194,7 @@ static int libxl__hotplug_disk(libxl__gc *gc, libxl__device *dev,
     LOGD(DEBUG, dev->domid, "Args and environment ready");
     rc = 1;
 
-error:
+out:
     return rc;
 }
 
